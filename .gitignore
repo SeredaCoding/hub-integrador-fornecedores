@@ -1,0 +1,12 @@
+# Dependências do Node (são pesadas e instaláveis, não envie)
+node_modules/
+
+# Arquivos de ambiente e senhas (SEGURANÇA MÁXIMA)
+.env
+
+# Arquivos de sistema operacional
+.DS_Store
+Thumbs.db
+
+# Logs de erro
+npm-debug.log*
