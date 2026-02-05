@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Doc Integração Fornecedor</title>
+    <style>body { font-family: sans-serif; padding: 40px; line-height: 1.6; }</style>
+</head>
+<body>
+    <h1>Manual de Integração</h1>
+    <p>Envie atualizações de estoque para o endpoint abaixo:</p>
+    <code>POST http://seu-dominio.com/v1/update-stock</code>
+    <h3>Exemplo de Payload:</h3>
+    <pre style="background: #eee; padding: 15px;">
+{
+  "sku": "AB123",
+  "preco": 150.50,
+  "estoque": 12
+}</pre>
+</body>
+</html>

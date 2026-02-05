@@ -10,3 +10,5 @@ Thumbs.db
 
 # Logs de erro
 npm-debug.log*
+# Arquivos de teste de carga
+stress-test.js

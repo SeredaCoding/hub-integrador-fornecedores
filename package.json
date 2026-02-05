@@ -1,0 +1,27 @@
+{
+  "name": "hub-integrador",
+  "version": "1.0.0",
+  "description": "Este projeto é um serviço intermediário (Hub) que monitora APIs de fornecedores e envia Webhooks para o ERP apenas quando há alteração de preço ou estoque.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SeredaCoding/hub-integrador-fornecedores.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/SeredaCoding/hub-integrador-fornecedores/issues"
+  },
+  "homepage": "https://github.com/SeredaCoding/hub-integrador-fornecedores#readme",
+  "dependencies": {
+    "axios": "^1.13.4",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "redis": "^5.10.0"
+  }
+}
