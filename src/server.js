@@ -17,6 +17,7 @@ const express = require('express');
 const redis = require('redis');
 const axios = require('axios');
 const mysql = require('mysql2/promise'); // Adicione esta linha no topo
+const qs = require('qs');
 
 // Pool de conexão com MySQL (Shared com Laravel)
 const db = mysql.createPool({
@@ -76,7 +77,7 @@ app.post('/v1/update-stock', async (req, res) => {
     const envelope = req.body.payload;
 
     if (!envelope || !envelope.itens) {
-        console.error(`[${new Date().toLocaleString()}] ⚠️ Payload vazio ou malformado recebido.`);
+        console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ⚠️ Payload vazio ou malformado recebido.`);
         return res.status(400).json({ error: 'Conteúdo (itens) não encontrado no payload.' });
     }
 
@@ -102,7 +103,7 @@ app.post('/v1/update-stock', async (req, res) => {
             const cod_prod_fornecedor = item[chaves[0]];
             
             if (!cod_prod_fornecedor) {
-                console.log(`[${new Date().toLocaleString()}] ⚠️ Pulando item: Identificador dinâmico não encontrado.`);
+                console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ⚠️ Pulando item: Identificador dinâmico não encontrado.`);
                 continue;
             }
 
@@ -116,7 +117,7 @@ app.post('/v1/update-stock', async (req, res) => {
             }
 
             // LOG ATUALIZADO (Se aparecer undefined aqui, o container não reiniciou com o código novo)
-            console.log(`[${new Date().toLocaleString()}] ✅ PROCESSANDO: ${cod_prod_fornecedor}`);
+            console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ✅ PROCESSANDO: ${cod_prod_fornecedor}`);
 
             if (simulate_only) {
                 await db.execute(
@@ -125,24 +126,50 @@ app.post('/v1/update-stock', async (req, res) => {
                 );
                 await cache.set(cacheKey, novoEstado, { EX: 86400 });
                 results.push({ cod_prod_fornecedor, status: "simulated" });
-           } else if (ERP_URL) {
+            } else if (ERP_URL) {
                 try {
+                    // Montando o payload combinando os parâmetros fixos com os dados do item
                     const payloadParaERP = {
-                        ...item,
-                        D070_Id: d070_ids
+                        ajax: 'true',
+                        acaoId: '676',
+                        requisicaoPura: '1',
+                        data: {
+                            auth_key: process.env.ERP_WEBHOOK_KEY,
+                            supplier_id: fornecedorDB.id,
+                            D070_Id: d070_ids,
+                            item: item
+                        }
                     };
-                    console.log(`[${new Date().toLocaleString()}] 📤 ENVIANDO AO ERP (update-stock):`, JSON.stringify(payloadParaERP));
-                    await axios.post(ERP_URL, payloadParaERP);
-                    
-                    await db.execute(
-                        'INSERT INTO sync_logs (supplier_id, sku, status, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())',
-                        [fornecedorDB.id, String(cod_prod_fornecedor), 'success']
-                    );
 
-                    await cache.set(cacheKey, novoEstado, { EX: 86400 });
-                    results.push({ cod_prod_fornecedor, status: "success" });
+                    console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📤 ENVIANDO AO ERP (update-stock):`, JSON.stringify(payloadParaERP));
+
+                    const responseERP = await axios.post(ERP_URL, qs.stringify(payloadParaERP), {
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+                    });
+
+                    console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📥 RETORNO DO ERP:`, JSON.stringify(responseERP.data));
+
+                    const erpData = responseERP.data;
+
+                    // VALIDACAO CRÍTICA: Só atualiza o cache se o ERP confirmou o sucesso
+                    if (erpData && erpData.success === true) {
+                        await cache.set(cacheKey, novoEstado, { EX: 86400 });
+                        
+                        await db.execute(
+                            'INSERT INTO sync_logs (supplier_id, sku, status, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())',
+                            [fornecedorDB.id, String(cod_prod_fornecedor), 'success']
+                        );
+                        
+                        results.push({ cod_prod_fornecedor, status: "success" });
+                    } else {
+                        // Se o ERP respondeu mas deu erro interno (ex: ID não encontrado)
+                        const erroMsg = erpData.message || "Erro desconhecido no ERP";
+                        console.error(`[${new Date().toLocaleString()}] ⚠️ ERP falhou ao atualizar: ${erroMsg}`);
+                        
+                        results.push({ cod_prod_fornecedor, status: "failed_in_erp", message: erroMsg });
+                    }
                 } catch (e) {
-                    console.error(`[${new Date().toLocaleString()}] ❌ Erro ERP cod_prod_fornecedor ${cod_prod_fornecedor}:`, e.message);
+                    console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ Erro ERP cod_prod_fornecedor ${cod_prod_fornecedor}:`, e.message);
                     results.push({ cod_prod_fornecedor, status: "error", message: e.message });
                 }
             }
@@ -155,14 +182,19 @@ app.post('/v1/update-stock', async (req, res) => {
         });
 
     } catch (error) {
-        console.error(`[${new Date().toLocaleString()}] ❌ CRITICAL ERROR:`, error.message);
+        console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ CRITICAL ERROR:`, error.message);
         res.status(500).json({ error: "Erro interno no processamento do lote." });
     }
 });
 
-// Exemplo no Node.js (Express)
+
+// Rota /sync atualizada para x-www-form-urlencoded
 app.post('/sync', async (req, res) => {
     const { supplier_id, identifier, payload } = req.body;
+
+    if (!payload || !Array.isArray(payload)) {
+        return res.status(400).json({ error: "Payload inválido" });
+    }
 
     for (const item of payload) {
         const dynamicKeys = Object.entries(item).map(([k, v]) => `${k}:${v}`).join(':');
@@ -172,18 +204,39 @@ app.post('/sync', async (req, res) => {
 
         if (lastValue !== currentValue) {
             // SÓ ENTRA AQUI SE HOUVE MUDANÇA
-            await cache.set(cacheKey, currentValue, { EX: 86400 });
-            
-            const payloadParaERP = {
-                origin: "HUB_INTEGRADOR",
-                supplier_id,
-                type: identifier,
-                data: item
-            };
-            console.log(`[${new Date().toLocaleString()}] 📤 ENVIANDO AO ERP (sync):`, JSON.stringify(payloadParaERP));
+            try {
+                // Monta o objeto com os parâmetros obrigatórios + dados do item
+                const payloadParaERP = {
+                    ajax: 'true',
+                    acaoId: '676',
+                    requisicaoPura: '1',
+                    origin: "HUB_INTEGRADOR",
+                    data: {
+                        supplier_id: supplier_id,
+                        type: identifier,
+                        auth_key: process.env.ERP_WEBHOOK_KEY,
+                        item: item 
+                    }
+                };
 
-            // Envia para o Webhook do ERP
-            await axios.post(process.env.ERP_WEBHOOK_URL, payloadParaERP);
+                console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📤 ENVIANDO AO ERP (sync):`, JSON.stringify(payloadParaERP));
+
+                // Envia para o Webhook do ERP formatado como URL Encoded
+                const responseERP = await axios.post(process.env.ERP_WEBHOOK_URL, qs.stringify(payloadParaERP), {
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    }
+                });
+
+                console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📥 RETORNO DO ERP:`, JSON.stringify(responseERP.data));
+                
+                // Atualiza o cache após o sucesso
+                await cache.set(cacheKey, currentValue, { EX: 86400 });
+
+            } catch (error) {
+                console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ Erro ao sincronizar item no ERP:`, error.message);
+                // Opcional: Decidir se interrompe o loop ou continua para o próximo item
+            }
         }
     }
     res.sendStatus(200);
