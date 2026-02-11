@@ -30,7 +30,8 @@ const db = mysql.createPool({
 
 const app = express();
 const path = require('path');
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -66,55 +67,83 @@ const getValueByPath = (obj, path) => {
 
 app.post('/v1/update-stock', async (req, res) => {
     const fornecedorKey = req.headers['x-api-key'];
+
+    if (!fornecedorKey) {
+        return res.status(401).json({ error: 'Chave de autenticação do fornecedor não enviada.' });
+    }
     
+    // O Laravel envia como ['payload' => $finalPayload], então acessamos req.body.payload
+    const envelope = req.body.payload;
+
+    if (!envelope || !envelope.itens) {
+        console.error(`[${new Date().toLocaleString()}] ⚠️ Payload vazio ou malformado recebido.`);
+        return res.status(400).json({ error: 'Conteúdo (itens) não encontrado no payload.' });
+    }
+
     try {
         const [rows] = await db.execute(
-            'SELECT id, name, field_mapping FROM suppliers WHERE api_key = ? AND is_active = 1',
+            'SELECT id, name FROM suppliers WHERE api_key = ? AND is_active = 1',
             [fornecedorKey]
         );
 
-        if (rows.length === 0) return res.status(401).json({ error: 'Não autorizado.' });
+        if (rows.length === 0) return res.status(401).json({ error: 'Fornecedor não encontrado ou inativo.' });
 
         const fornecedorDB = rows[0];
-        const activeMapping = fornecedorDB.field_mapping[0]; 
-        const mappings = activeMapping.mapping;
-        const listRoot = activeMapping.list_root;
+        const d070_ids = envelope.D070_Id || [];
+        const produtos = envelope.itens;
         const simulate_only = String(req.body.simulate_only) === 'true' || req.body.simulate_only === true;
-
-        let produtos = listRoot ? getValueByPath(req.body, listRoot) : [req.body];
-        if (!Array.isArray(produtos)) produtos = [produtos];
-
-        const results = [];
+        
         const ERP_URL = !simulate_only ? (await getDynamicConfig('erp_webhook_url') || process.env.ERP_WEBHOOK_URL) : null;
+        const results = [];
 
-        for (const itemRaw of produtos) {
-            let sku = getValueByPath(itemRaw, mappings.find(m => m.to === 'sku')?.from);
-            let preco = getValueByPath(itemRaw, mappings.find(m => m.to === 'preco')?.from);
-            let estoque = getValueByPath(itemRaw, mappings.find(m => m.to === 'estoque')?.from);
-
-            if (!sku) continue;
-
-            const cacheKey = `f:${fornecedorDB.id}:sku:${sku}`;
-            const novoEstado = JSON.stringify({ preco, estoque });
-            const estadoAnterior = await cache.get(cacheKey);
-
-            if (estadoAnterior === novoEstado) {
-                results.push({ sku, status: "skipped" });
+        for (const item of produtos) {
+            // Identifica a primeira chave do objeto para usar como SKU dinâmico
+            const chaves = Object.keys(item);
+            const cod_prod_fornecedor = item[chaves[0]];
+            
+            if (!cod_prod_fornecedor) {
+                console.log(`[${new Date().toLocaleString()}] ⚠️ Pulando item: Identificador dinâmico não encontrado.`);
                 continue;
             }
 
+            const cacheKey = `f:${fornecedorDB.id}:D070_Id:${d070_ids[0] || '0'}:${Object.entries(item).map(([k, v]) => `${k}:${v}`).join(':')}`;
+            const novoEstado = JSON.stringify(item);
+            const estadoAnterior = await cache.get(cacheKey);
+
+            if (estadoAnterior === novoEstado) {
+                results.push({ cod_prod_fornecedor, status: "skipped" });
+                continue;
+            }
+
+            // LOG ATUALIZADO (Se aparecer undefined aqui, o container não reiniciou com o código novo)
+            console.log(`[${new Date().toLocaleString()}] ✅ PROCESSANDO: ${cod_prod_fornecedor}`);
+
             if (simulate_only) {
-                await db.execute('INSERT INTO sync_logs (supplier_id, sku, status, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())', [fornecedorDB.id, sku, 'simulation']);
+                await db.execute(
+                    'INSERT INTO sync_logs (supplier_id, sku, status, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())',
+                    [fornecedorDB.id, String(cod_prod_fornecedor), 'simulation']
+                );
                 await cache.set(cacheKey, novoEstado, { EX: 86400 });
-                results.push({ sku, status: "simulated" });
-            } else if (ERP_URL) {
+                results.push({ cod_prod_fornecedor, status: "simulated" });
+           } else if (ERP_URL) {
                 try {
-                    await axios.post(ERP_URL, { sku, preco, estoque, fornecedor: fornecedorDB.id });
-                    await db.execute('INSERT INTO sync_logs (supplier_id, sku, status, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())', [fornecedorDB.id, sku, 'success']);
+                    const payloadParaERP = {
+                        ...item,
+                        D070_Id: d070_ids
+                    };
+                    console.log(`[${new Date().toLocaleString()}] 📤 ENVIANDO AO ERP (update-stock):`, JSON.stringify(payloadParaERP));
+                    await axios.post(ERP_URL, payloadParaERP);
+                    
+                    await db.execute(
+                        'INSERT INTO sync_logs (supplier_id, sku, status, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())',
+                        [fornecedorDB.id, String(cod_prod_fornecedor), 'success']
+                    );
+
                     await cache.set(cacheKey, novoEstado, { EX: 86400 });
-                    results.push({ sku, status: "success" });
+                    results.push({ cod_prod_fornecedor, status: "success" });
                 } catch (e) {
-                    results.push({ sku, status: "error", message: e.message });
+                    console.error(`[${new Date().toLocaleString()}] ❌ Erro ERP cod_prod_fornecedor ${cod_prod_fornecedor}:`, e.message);
+                    results.push({ cod_prod_fornecedor, status: "error", message: e.message });
                 }
             }
         }
@@ -126,8 +155,8 @@ app.post('/v1/update-stock', async (req, res) => {
         });
 
     } catch (error) {
-        console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ ERRO:`, error.message);
-        res.status(500).json({ error: "Falha na sincronização." });
+        console.error(`[${new Date().toLocaleString()}] ❌ CRITICAL ERROR:`, error.message);
+        res.status(500).json({ error: "Erro interno no processamento do lote." });
     }
 });
 
@@ -136,21 +165,25 @@ app.post('/sync', async (req, res) => {
     const { supplier_id, identifier, payload } = req.body;
 
     for (const item of payload) {
-        const cacheKey = `hub:cache:${supplier_id}:${identifier}:${item.sku}`;
-        const lastValue = await redis.get(cacheKey);
+        const dynamicKeys = Object.entries(item).map(([k, v]) => `${k}:${v}`).join(':');
+        const cacheKey = `f:${supplier_id}:${identifier}:${dynamicKeys}`;
+        const lastValue = await cache.get(cacheKey);
         const currentValue = JSON.stringify(item);
 
         if (lastValue !== currentValue) {
             // SÓ ENTRA AQUI SE HOUVE MUDANÇA
-            await redis.set(cacheKey, currentValue);
+            await cache.set(cacheKey, currentValue, { EX: 86400 });
             
-            // Envia para o Webhook do ERP
-            await axios.post(process.env.ERP_WEBHOOK_URL, {
+            const payloadParaERP = {
                 origin: "HUB_INTEGRADOR",
                 supplier_id,
                 type: identifier,
                 data: item
-            });
+            };
+            console.log(`[${new Date().toLocaleString()}] 📤 ENVIANDO AO ERP (sync):`, JSON.stringify(payloadParaERP));
+
+            // Envia para o Webhook do ERP
+            await axios.post(process.env.ERP_WEBHOOK_URL, payloadParaERP);
         }
     }
     res.sendStatus(200);
