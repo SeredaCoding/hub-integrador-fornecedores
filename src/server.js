@@ -126,52 +126,31 @@ app.post('/v1/update-stock', async (req, res) => {
                 );
                 await cache.set(cacheKey, novoEstado, { EX: 86400 });
                 results.push({ cod_prod_fornecedor, status: "simulated" });
-            } else if (ERP_URL) {
-                try {
-                    // Montando o payload combinando os parâmetros fixos com os dados do item
-                    const payloadParaERP = {
-                        ajax: 'true',
-                        acaoId: '676',
-                        requisicaoPura: '1',
-                        data: {
-                            auth_key: process.env.ERP_WEBHOOK_KEY,
-                            supplier_id: fornecedorDB.id,
-                            D070_Id: d070_ids,
-                            item: item
-                        }
-                    };
+           } else if (ERP_URL) {
 
-                    console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📤 ENVIANDO AO ERP (update-stock):`, JSON.stringify(payloadParaERP));
-
-                    const responseERP = await axios.post(ERP_URL, qs.stringify(payloadParaERP), {
-                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-                    });
-
-                    console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📥 RETORNO DO ERP:`, JSON.stringify(responseERP.data));
-
-                    const erpData = responseERP.data;
-
-                    // VALIDACAO CRÍTICA: Só atualiza o cache se o ERP confirmou o sucesso
-                    if (erpData && erpData.success === true) {
-                        await cache.set(cacheKey, novoEstado, { EX: 86400 });
-                        
-                        await db.execute(
-                            'INSERT INTO sync_logs (supplier_id, sku, status, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())',
-                            [fornecedorDB.id, String(cod_prod_fornecedor), 'success']
-                        );
-                        
-                        results.push({ cod_prod_fornecedor, status: "success" });
-                    } else {
-                        // Se o ERP respondeu mas deu erro interno (ex: ID não encontrado)
-                        const erroMsg = erpData.message || "Erro desconhecido no ERP";
-                        console.error(`[${new Date().toLocaleString()}] ⚠️ ERP falhou ao atualizar: ${erroMsg}`);
-                        
-                        results.push({ cod_prod_fornecedor, status: "failed_in_erp", message: erroMsg });
+                const payloadParaERP = {
+                    ajax: 'true',
+                    acaoId: '676',
+                    requisicaoPura: '1',
+                    data: {
+                        auth_key: process.env.ERP_WEBHOOK_KEY,
+                        supplier_id: fornecedorDB.id,
+                        D070_Id: d070_ids,
+                        item: item
                     }
-                } catch (e) {
-                    console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ Erro ERP cod_prod_fornecedor ${cod_prod_fornecedor}:`, e.message);
-                    results.push({ cod_prod_fornecedor, status: "error", message: e.message });
-                }
+                };
+
+                console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📬 ENFILEIRANDO PARA ERP: ${cod_prod_fornecedor}`);
+
+                await cache.xAdd('erp_updates', '*', {
+                    supplier_id: String(fornecedorDB.id),
+                    sku: String(cod_prod_fornecedor),
+                    cacheKey: cacheKey,
+                    novoEstado: novoEstado,
+                    payload: JSON.stringify(payloadParaERP)
+                });
+
+                results.push({ cod_prod_fornecedor, status: "queued" });
             }
         }
 
