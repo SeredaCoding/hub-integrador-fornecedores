@@ -189,58 +189,58 @@ app.post('/v1/update-stock', async (req, res) => {
 
 
 // Rota /sync atualizada para x-www-form-urlencoded
-app.post('/sync', async (req, res) => {
-    const { supplier_id, identifier, payload } = req.body;
+// app.post('/sync', async (req, res) => {
+//     const { supplier_id, identifier, payload } = req.body;
 
-    if (!payload || !Array.isArray(payload)) {
-        return res.status(400).json({ error: "Payload inválido" });
-    }
+//     if (!payload || !Array.isArray(payload)) {
+//         return res.status(400).json({ error: "Payload inválido" });
+//     }
 
-    for (const item of payload) {
-        const dynamicKeys = Object.entries(item).map(([k, v]) => `${k}:${v}`).join(':');
-        const cacheKey = `f:${supplier_id}:${identifier}:${dynamicKeys}`;
-        const lastValue = await cache.get(cacheKey);
-        const currentValue = JSON.stringify(item);
+//     for (const item of payload) {
+//         const dynamicKeys = Object.entries(item).map(([k, v]) => `${k}:${v}`).join(':');
+//         const cacheKey = `f:${supplier_id}:${identifier}:${dynamicKeys}`;
+//         const lastValue = await cache.get(cacheKey);
+//         const currentValue = JSON.stringify(item);
 
-        if (lastValue !== currentValue) {
-            // SÓ ENTRA AQUI SE HOUVE MUDANÇA
-            try {
-                // Monta o objeto com os parâmetros obrigatórios + dados do item
-                const payloadParaERP = {
-                    ajax: 'true',
-                    acaoId: '676',
-                    requisicaoPura: '1',
-                    origin: "HUB_INTEGRADOR",
-                    data: {
-                        supplier_id: supplier_id,
-                        type: identifier,
-                        auth_key: process.env.ERP_WEBHOOK_KEY,
-                        item: item 
-                    }
-                };
+//         if (lastValue !== currentValue) {
+//             // SÓ ENTRA AQUI SE HOUVE MUDANÇA
+//             try {
+//                 // Monta o objeto com os parâmetros obrigatórios + dados do item
+//                 const payloadParaERP = {
+//                     ajax: 'true',
+//                     acaoId: '676',
+//                     requisicaoPura: '1',
+//                     origin: "HUB_INTEGRADOR",
+//                     data: {
+//                         supplier_id: supplier_id,
+//                         type: identifier,
+//                         auth_key: process.env.ERP_WEBHOOK_KEY,
+//                         item: item 
+//                     }
+//                 };
 
-                console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📤 ENVIANDO AO ERP (sync):`, JSON.stringify(payloadParaERP));
+//                 console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📤 ENVIANDO AO ERP (sync):`, JSON.stringify(payloadParaERP));
 
-                // Envia para o Webhook do ERP formatado como URL Encoded
-                const responseERP = await axios.post(process.env.ERP_WEBHOOK_URL, qs.stringify(payloadParaERP), {
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded'
-                    }
-                });
+//                 // Envia para o Webhook do ERP formatado como URL Encoded
+//                 const responseERP = await axios.post(process.env.ERP_WEBHOOK_URL, qs.stringify(payloadParaERP), {
+//                     headers: {
+//                         'Content-Type': 'application/x-www-form-urlencoded'
+//                     }
+//                 });
 
-                console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📥 RETORNO DO ERP:`, JSON.stringify(responseERP.data));
+//                 console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📥 RETORNO DO ERP:`, JSON.stringify(responseERP.data));
                 
-                // Atualiza o cache após o sucesso
-                await cache.set(cacheKey, currentValue, { EX: 86400 });
+//                 // Atualiza o cache após o sucesso
+//                 await cache.set(cacheKey, currentValue, { EX: 86400 });
 
-            } catch (error) {
-                console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ Erro ao sincronizar item no ERP:`, error.message);
-                // Opcional: Decidir se interrompe o loop ou continua para o próximo item
-            }
-        }
-    }
-    res.sendStatus(200);
-});
+//             } catch (error) {
+//                 console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ Erro ao sincronizar item no ERP:`, error.message);
+//                 // Opcional: Decidir se interrompe o loop ou continua para o próximo item
+//             }
+//         }
+//     }
+//     res.sendStatus(200);
+// });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
