@@ -52,8 +52,13 @@ async function startWorker() {
                     const messageId = message.id;
                     const data = message.message;
 
-                    const payload = JSON.parse(data.payload);
+                    let payload = JSON.parse(data.payload);
                     const retryCount = parseInt(data.retryCount || 0);
+
+                    // Injeção de Data Real (Anti-defasagem)
+                    const now = new Date().toLocaleString('sv-SE', { timeZone: 'America/Sao_Paulo' }).replace('T', ' ');
+                    const stringifiedPayload = JSON.stringify(payload).replace(/RAW:CURRENT_TIMESTAMP|DYNAMIC_TIMESTAMP/g, now);
+                    payload = JSON.parse(stringifiedPayload);
 
                     try {
 

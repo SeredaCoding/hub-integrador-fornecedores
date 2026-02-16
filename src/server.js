@@ -16,17 +16,16 @@ requiredEnv.forEach(envVar => {
 const express = require('express');
 const redis = require('redis');
 const axios = require('axios');
-const mysql = require('mysql2/promise'); // Adicione esta linha no topo
+const { Pool } = require('pg'); 
 const qs = require('qs');
 
-// Pool de conexão com MySQL (Shared com Laravel)
-const db = mysql.createPool({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_DATABASE,
-    waitForConnections: true,
-    connectionLimit: 10
+// Pool de conexão com PostgreSQL (Extraindo do envelope injetado pelo Docker)
+const db = new Pool({
+    host: process.env.DB_HOST || 'db-tunnel',
+    user: process.env.DB_USER || process.env.DB_USERNAME, 
+    password: process.env.DB_PASSWORD || process.env.DB_PASS,
+    database: process.env.DB_DATABASE || process.env.DB_NAME,
+    port: parseInt(process.env.DB_PORT || '5432'),
 });
 
 const app = express();
@@ -50,11 +49,12 @@ cache.connect().then(() => console.log(`[${new Date().toLocaleString('pt-BR', { 
 // Função para buscar configurações dinâmicas do Banco de Dados
 async function getDynamicConfig(key) {
     try {
-        const [rows] = await db.execute(
-            'SELECT value FROM configs WHERE name = ? LIMIT 1',
+        // Busca na tabela app_configs criada anteriormente via Laravel
+        const res = await db.query(
+            'SELECT value FROM app_configs WHERE key = $1 LIMIT 1',
             [key]
         );
-        return rows.length > 0 ? rows[0].value : null;
+        return res.rows.length > 0 ? res.rows[0].value : null;
     } catch (error) {
         console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ Erro ao buscar config ${key}:`, error.message);
         return null;
@@ -76,22 +76,22 @@ app.post('/v1/update-stock', async (req, res) => {
     // O Laravel envia como ['payload' => $finalPayload], então acessamos req.body.payload
     const envelope = req.body.payload;
 
-    if (!envelope || !envelope.itens) {
+    if (!envelope || (!envelope.entries && !envelope.itens)) {
         console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ⚠️ Payload vazio ou malformado recebido.`);
-        return res.status(400).json({ error: 'Conteúdo (itens) não encontrado no payload.' });
+        return res.status(400).json({ error: 'Conteúdo (entries/itens) não encontrado no payload.' });
     }
 
     try {
-        const [rows] = await db.execute(
-            'SELECT id, name FROM suppliers WHERE api_key = ? AND is_active = 1',
+        const res = await db.query(
+            'SELECT id, name FROM suppliers WHERE api_key = $1 AND is_active = 1',
             [fornecedorKey]
         );
 
-        if (rows.length === 0) return res.status(401).json({ error: 'Fornecedor não encontrado ou inativo.' });
+        if (res.rows.length === 0) return res.status(401).json({ error: 'Fornecedor não encontrado ou inativo.' });
 
-        const fornecedorDB = rows[0];
-        const d070_ids = envelope.D070_Id || [];
-        const produtos = envelope.itens;
+        const fornecedorDB = res.rows[0];
+        const global_ids = envelope.global_ids || envelope.D070_Id || [];
+        const produtos = envelope.entries || envelope.itens;
         const simulate_only = String(req.body.simulate_only) === 'true' || req.body.simulate_only === true;
         
         const ERP_URL = !simulate_only ? (await getDynamicConfig('erp_webhook_url') || process.env.ERP_WEBHOOK_URL) : null;
@@ -120,8 +120,8 @@ app.post('/v1/update-stock', async (req, res) => {
             console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ✅ PROCESSANDO: ${cod_prod_fornecedor}`);
 
             if (simulate_only) {
-                await db.execute(
-                    'INSERT INTO sync_logs (supplier_id, sku, status, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())',
+                await db.query(
+                    'INSERT INTO sync_logs (supplier_id, sku, status, created_at, updated_at) VALUES ($1, $2, $3, NOW(), NOW())',
                     [fornecedorDB.id, String(cod_prod_fornecedor), 'simulation']
                 );
                 await cache.set(cacheKey, novoEstado, { EX: 86400 });
@@ -135,8 +135,9 @@ app.post('/v1/update-stock', async (req, res) => {
                     data: {
                         auth_key: process.env.ERP_WEBHOOK_KEY,
                         supplier_id: fornecedorDB.id,
-                        D070_Id: d070_ids,
-                        item: item
+                        global_ids: global_ids,
+                        // Se o item já vier estruturado (novo formato), usa direto, senão mantém compatibilidade
+                        ...(item.data ? item : { item: item })
                     }
                 };
 
@@ -165,61 +166,6 @@ app.post('/v1/update-stock', async (req, res) => {
         res.status(500).json({ error: "Erro interno no processamento do lote." });
     }
 });
-
-
-// Rota /sync atualizada para x-www-form-urlencoded
-// app.post('/sync', async (req, res) => {
-//     const { supplier_id, identifier, payload } = req.body;
-
-//     if (!payload || !Array.isArray(payload)) {
-//         return res.status(400).json({ error: "Payload inválido" });
-//     }
-
-//     for (const item of payload) {
-//         const dynamicKeys = Object.entries(item).map(([k, v]) => `${k}:${v}`).join(':');
-//         const cacheKey = `f:${supplier_id}:${identifier}:${dynamicKeys}`;
-//         const lastValue = await cache.get(cacheKey);
-//         const currentValue = JSON.stringify(item);
-
-//         if (lastValue !== currentValue) {
-//             // SÓ ENTRA AQUI SE HOUVE MUDANÇA
-//             try {
-//                 // Monta o objeto com os parâmetros obrigatórios + dados do item
-//                 const payloadParaERP = {
-//                     ajax: 'true',
-//                     acaoId: '676',
-//                     requisicaoPura: '1',
-//                     origin: "HUB_INTEGRADOR",
-//                     data: {
-//                         supplier_id: supplier_id,
-//                         type: identifier,
-//                         auth_key: process.env.ERP_WEBHOOK_KEY,
-//                         item: item 
-//                     }
-//                 };
-
-//                 console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📤 ENVIANDO AO ERP (sync):`, JSON.stringify(payloadParaERP));
-
-//                 // Envia para o Webhook do ERP formatado como URL Encoded
-//                 const responseERP = await axios.post(process.env.ERP_WEBHOOK_URL, qs.stringify(payloadParaERP), {
-//                     headers: {
-//                         'Content-Type': 'application/x-www-form-urlencoded'
-//                     }
-//                 });
-
-//                 console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📥 RETORNO DO ERP:`, JSON.stringify(responseERP.data));
-                
-//                 // Atualiza o cache após o sucesso
-//                 await cache.set(cacheKey, currentValue, { EX: 86400 });
-
-//             } catch (error) {
-//                 console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ Erro ao sincronizar item no ERP:`, error.message);
-//                 // Opcional: Decidir se interrompe o loop ou continua para o próximo item
-//             }
-//         }
-//     }
-//     res.sendStatus(200);
-// });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
