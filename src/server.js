@@ -19,14 +19,16 @@ const axios = require('axios');
 const { Pool } = require('pg'); 
 const qs = require('qs');
 
-// Pool de conexão com PostgreSQL (Extraindo do envelope injetado pelo Docker)
-const db = new Pool({
+const dbConfig = {
     host: process.env.DB_HOST || 'db-tunnel',
     user: process.env.DB_USER || process.env.DB_USERNAME, 
     password: process.env.DB_PASSWORD || process.env.DB_PASS,
     database: process.env.DB_DATABASE || process.env.DB_NAME,
     port: parseInt(process.env.DB_PORT || '5432'),
-});
+};
+
+const db = new Pool(dbConfig);
+module.exports = { db, dbConfig };
 
 const app = express();
 const path = require('path');
@@ -50,14 +52,14 @@ cache.connect().then(() => console.log(`[${new Date().toLocaleString('pt-BR', { 
 async function getDynamicConfig(key) {
     try {
         // Busca na tabela app_configs criada anteriormente via Laravel
-        const res = await db.query(
+        const configResult = await db.query(
             'SELECT value FROM app_configs WHERE key = $1 LIMIT 1',
             [key]
         );
-        return res.rows.length > 0 ? res.rows[0].value : null;
+        return configResult.rows.length > 0 ? configResult.rows[0].value : null;
     } catch (error) {
-        console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ Erro ao buscar config ${key}:`, error.message);
-        return null;
+        console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ CRITICAL ERROR:`, error.stack);
+        throw error;
     }
 }
 
@@ -82,14 +84,28 @@ app.post('/v1/update-stock', async (req, res) => {
     }
 
     try {
-        const res = await db.query(
-            'SELECT id, name FROM suppliers WHERE api_key = $1 AND is_active = 1',
+        const supplierResult = await db.query(
+            'SELECT id, name FROM suppliers WHERE api_key = $1 AND is_active = TRUE',
             [fornecedorKey]
         );
 
-        if (res.rows.length === 0) return res.status(401).json({ error: 'Fornecedor não encontrado ou inativo.' });
+        if (supplierResult.rows.length === 0) return res.status(401).json({ error: 'Fornecedor não encontrado ou inativo.' });
 
-        const fornecedorDB = res.rows[0];
+        const fornecedorDB = supplierResult.rows[0];
+
+        // Busca mapeamento para identificar campos a excluir do cache
+        const mappingResult = await db.query('SELECT field_mapping FROM suppliers WHERE id = $1', [fornecedorDB.id]);
+        const fieldMapping = mappingResult.rows[0]?.field_mapping || [];
+        const blacklistedFields = [];
+        
+        fieldMapping.forEach(ep => {
+            if (ep.mapping) {
+                ep.mapping.forEach(m => {
+                    if (m.exclude_from_cache === true && m.to) blacklistedFields.push(m.to);
+                });
+            }
+        });
+
         const global_ids = envelope.global_ids || envelope.D070_Id || [];
         const produtos = envelope.entries || envelope.itens;
         const simulate_only = String(req.body.simulate_only) === 'true' || req.body.simulate_only === true;
@@ -98,7 +114,7 @@ app.post('/v1/update-stock', async (req, res) => {
         const results = [];
 
         for (const item of produtos) {
-            // Identifica a primeira chave do objeto para usar como SKU dinâmico
+            // Identifica a primeira chave do objeto para usar como Cod. produto dinâmico
             const chaves = Object.keys(item);
             const cod_prod_fornecedor = item[chaves[0]];
             
@@ -107,8 +123,15 @@ app.post('/v1/update-stock', async (req, res) => {
                 continue;
             }
 
-            const cacheKey = `f:${fornecedorDB.id}:D070_Id:${d070_ids[0] || '0'}:${Object.entries(item).map(([k, v]) => `${k}:${v}`).join(':')}`;
-            const novoEstado = JSON.stringify(item);
+            // Usamos global_ids que foi definido acima
+            const d070_id_safe = (global_ids && global_ids.length > 0) ? global_ids[0] : '0';
+            
+            // Sanitização dinâmica baseada no cadastro do mapeamento
+            const itemParaComparacao = { ...item };
+            blacklistedFields.forEach(field => delete itemParaComparacao[field]);
+            
+            const cacheKey = `f:${fornecedorDB.id}:D070_Id:${d070_id_safe}:${itemParaComparacao.D069_Codigo_Produto || Object.values(itemParaComparacao)[0]}`;
+            const novoEstado = JSON.stringify(itemParaComparacao);
             const estadoAnterior = await cache.get(cacheKey);
 
             if (estadoAnterior === novoEstado) {
@@ -121,8 +144,8 @@ app.post('/v1/update-stock', async (req, res) => {
 
             if (simulate_only) {
                 await db.query(
-                    'INSERT INTO sync_logs (supplier_id, sku, status, created_at, updated_at) VALUES ($1, $2, $3, NOW(), NOW())',
-                    [fornecedorDB.id, String(cod_prod_fornecedor), 'simulation']
+                    'INSERT INTO sync_logs (supplier_id, cod_produto, status, created_at, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+                    [parseInt(fornecedorDB.id), String(cod_prod_fornecedor), 'simulation']
                 );
                 await cache.set(cacheKey, novoEstado, { EX: 86400 });
                 results.push({ cod_prod_fornecedor, status: "simulated" });
@@ -135,9 +158,8 @@ app.post('/v1/update-stock', async (req, res) => {
                     data: {
                         auth_key: process.env.ERP_WEBHOOK_KEY,
                         supplier_id: fornecedorDB.id,
-                        global_ids: global_ids,
-                        // Se o item já vier estruturado (novo formato), usa direto, senão mantém compatibilidade
-                        ...(item.data ? item : { item: item })
+                        D070_Id: global_ids,
+                        item: (item.data ? item.data : item)
                     }
                 };
 
@@ -145,7 +167,7 @@ app.post('/v1/update-stock', async (req, res) => {
 
                 await cache.xAdd('erp_updates', '*', {
                     supplier_id: String(fornecedorDB.id),
-                    sku: String(cod_prod_fornecedor),
+                    cod_produto_fornecedor: String(cod_prod_fornecedor),
                     cacheKey: cacheKey,
                     novoEstado: novoEstado,
                     payload: JSON.stringify(payloadParaERP)
@@ -162,7 +184,13 @@ app.post('/v1/update-stock', async (req, res) => {
         });
 
     } catch (error) {
-        console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ CRITICAL ERROR:`, error.message);
+        console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ CRITICAL ERROR:`, {
+            message: error.message,
+            detail: error.detail,
+            hint: error.hint,
+            position: error.position,
+            stack: error.stack
+        });
         res.status(500).json({ error: "Erro interno no processamento do lote." });
     }
 });
