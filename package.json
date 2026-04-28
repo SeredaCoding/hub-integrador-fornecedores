@@ -19,6 +19,7 @@
   },
   "homepage": "https://github.com/SeredaCoding/hub-integrador-fornecedores#readme",
   "dependencies": {
+    "amqplib": "^1.0.3",
     "axios": "^1.13.4",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
