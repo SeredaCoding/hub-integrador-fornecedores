@@ -92,9 +92,8 @@ async function getDynamicConfig(key) {
 }
 
 // Função Utilitária para Dot Notation (Suporta Objetos e Arrays)
-const getValueByPath = (obj, path) => {
-    return path.split('.').reduce((acc, part) => acc && acc[part], obj);
-};
+const { getValueByPath } = require('./utils/valueGetter');
+const { generateCacheKey } = require('./utils/cacheKeyGenerator');
 
 app.post('/v1/update-stock', async (req, res) => {
     const fornecedorKey = req.headers['x-api-key'];
@@ -158,7 +157,7 @@ app.post('/v1/update-stock', async (req, res) => {
             const itemParaComparacao = { ...item };
             blacklistedFields.forEach(field => delete itemParaComparacao[field]);
             
-            const cacheKey = `f:${fornecedorDB.id}:D070_Id:${d070_id_safe}:${itemParaComparacao.D069_Codigo_Produto || Object.values(itemParaComparacao)[0]}`;
+            const cacheKey = generateCacheKey(fornecedorDB.id, global_ids, itemParaComparacao);
             const novoEstado = JSON.stringify(itemParaComparacao);
             const estadoAnterior = await cache.get(cacheKey);
 
@@ -229,7 +228,12 @@ app.post('/v1/update-stock', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 🚀 HUB ONLINE - Porta: ${PORT}`);
-    console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📡 Modo: Configuração Dinâmica via Banco de Dados Ativa.\n`);
-});
+
+if (require.main === module) {
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`\n[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 🚀 HUB ONLINE - Porta: ${PORT}`);
+        console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📡 Modo: Configuração Dinâmica via Banco de Dados Ativa.\n`);
+    });
+}
+
+module.exports = app;

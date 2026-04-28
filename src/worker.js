@@ -4,6 +4,8 @@ const amqp = require('amqplib');
 const axios = require('axios');
 const qs = require('qs');
 const { Pool } = require('pg');
+const { normalizeProductId } = require('./utils/productNormalizer');
+const { injectTimestamp } = require('./utils/timestampInjector');
 
 const db = new Pool({
     host: process.env.DB_HOST || 'db-tunnel',
@@ -80,10 +82,7 @@ async function processMessage(msg) {
     let payload = JSON.parse(data.payload);
     
     // Normalização do identificador do produto
-    if (!data.cod_produto_fornecedor || data.cod_produto_fornecedor === 'true' || data.cod_produto_fornecedor === true) {
-        const potentialId = payload.data?.item?.D069_Codigo_Produto || payload.D069_Codigo || payload.cod_produto || payload.SKU || Object.values(payload).find(v => typeof v !== 'boolean');
-        data.cod_produto_fornecedor = String(potentialId);
-    }
+    data.cod_produto_fornecedor = normalizeProductId(data, payload);
     
     // Injeção de Data Real
     const now = new Date().toLocaleString('sv-SE', { timeZone: 'America/Sao_Paulo' }).replace('T', ' ');
