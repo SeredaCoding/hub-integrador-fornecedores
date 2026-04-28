@@ -6,7 +6,7 @@ if (fs.existsSync('.env')) {
     console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ ERRO: Arquivo .env não encontrado no diretório raiz.`);
 }
 // Verificação das variáveis de ambiente
-const requiredEnv = ['REDIS_URL', 'ERP_WEBHOOK_URL', 'HUB_API_KEY', 'ERP_WEBHOOK_KEY'];
+const requiredEnv = ['RABBITMQ_URL', 'ERP_WEBHOOK_URL', 'HUB_API_KEY', 'ERP_WEBHOOK_KEY'];
 requiredEnv.forEach(envVar => {
     if (!process.env[envVar]) {
         console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ⚠️ AVISO: Variável de ambiente ${envVar} não definida.`);
@@ -15,6 +15,7 @@ requiredEnv.forEach(envVar => {
 
 const express = require('express');
 const redis = require('redis');
+const amqp = require('amqplib');
 const axios = require('axios');
 const { Pool } = require('pg'); 
 const qs = require('qs');
@@ -41,10 +42,37 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
-// 1. Conexão Redis com Log
+// 1. Conexão Redis (Apenas para Cache)
 const cache = redis.createClient({ url: process.env.REDIS_URL });
 cache.on('error', err => console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ Erro no Redis:`, err));
-cache.connect().then(() => console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ✅ Conectado ao Redis com sucesso!`));
+cache.connect().then(() => console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ✅ Conectado ao Redis (Cache) com sucesso!`));
+
+// 2. Conexão RabbitMQ
+let rabbitChannel = null;
+async function connectRabbitMQ() {
+    try {
+        const connection = await amqp.connect(process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672');
+        rabbitChannel = await connection.createChannel();
+        await rabbitChannel.assertExchange('erp_updates', 'direct', { durable: true });
+        await rabbitChannel.assertQueue('erp_updates', { 
+            durable: true,
+            deadLetterExchange: 'erp_dlx',
+            deadLetterRoutingKey: 'erp_dead_letter'
+        });
+        await rabbitChannel.bindQueue('erp_updates', 'erp_updates', '');
+        
+        // Configurar Dead Letter Exchange
+        await rabbitChannel.assertExchange('erp_dlx', 'direct', { durable: true });
+        await rabbitChannel.assertQueue('erp_dead_letter', { durable: true });
+        await rabbitChannel.bindQueue('erp_dead_letter', 'erp_dlx', 'erp_dead_letter');
+        
+        console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ✅ Conectado ao RabbitMQ com sucesso!`);
+    } catch (err) {
+        console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ Erro no RabbitMQ:`, err.message);
+        setTimeout(connectRabbitMQ, 5000);
+    }
+}
+connectRabbitMQ();
 
 // const ERP_URL = process.env.ERP_WEBHOOK_URL;
 
@@ -165,13 +193,18 @@ app.post('/v1/update-stock', async (req, res) => {
 
                 console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] 📬 ENFILEIRANDO PARA ERP: ${cod_prod_fornecedor}`);
 
-                await cache.xAdd('erp_updates', '*', {
-                    supplier_id: String(fornecedorDB.id),
-                    cod_produto_fornecedor: String(cod_prod_fornecedor),
-                    cacheKey: cacheKey,
-                    novoEstado: novoEstado,
-                    payload: JSON.stringify(payloadParaERP)
-                });
+                if (rabbitChannel) {
+                    rabbitChannel.sendToQueue('erp_updates', Buffer.from(JSON.stringify({
+                        supplier_id: String(fornecedorDB.id),
+                        cod_produto_fornecedor: String(cod_prod_fornecedor),
+                        cacheKey: cacheKey,
+                        novoEstado: novoEstado,
+                        payload: JSON.stringify(payloadParaERP),
+                        retryCount: '0'
+                    })), { persistent: true });
+                } else {
+                    console.error(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ❌ RabbitMQ não conectado. Mensagem não enviada.`);
+                }
 
                 results.push({ cod_prod_fornecedor, status: "queued" });
             }
